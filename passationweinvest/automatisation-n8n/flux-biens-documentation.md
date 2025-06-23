@@ -1,4 +1,4 @@
-# 🔄 Automatisation N8N - Flux des Biens
+# 🔄 Automatisation - Flux des Biens
 
 ## 🏠 Flux Bien - Système Complet
 

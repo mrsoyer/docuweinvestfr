@@ -5,6 +5,65 @@
 ### 🎯 Vue d'ensemble
 Le système de synchronisation des agences récupère les données depuis l'API Netty, les enrichit avec des informations Google My Business, et maintient la table `agences` à jour.
 
+### 📊 Schéma global du système
+
+```mermaid
+graph TB
+    subgraph "Sources de données"
+        A1[API Netty<br/>Agences]
+        A2[API Netty<br/>Users]
+        A3[Google My Business<br/>via SerpAPI]
+        A4[Table Properties<br/>Comptage biens]
+    end
+    
+    subgraph "Workflows n8n"
+        B1[Workflow Agences<br/>Schedule]
+        B2[Workflow Users<br/>10 min]
+    end
+    
+    subgraph "Script Python"
+        C1[Fusion données<br/>Agences + Users]
+        C2[Calcul stats<br/>Biens par agent]
+        C3[Génération slugs<br/>URLs uniques]
+        C4[Sync Bubble<br/>Directory]
+    end
+    
+    subgraph "Base de données"
+        D1[(Table agences)]
+        D2[(Table users)]
+        D3[(Table directories)]
+    end
+    
+    subgraph "Destinations"
+        E1[Bubble Directory<br/>Annuaire web]
+        E2[Bubble Search<br/>Autocomplétion]
+        E3[Imgix CDN<br/>Cache images]
+    end
+    
+    A1 --> B1
+    A3 --> B1
+    B1 --> D1
+    
+    A2 --> B2
+    B2 --> D2
+    B2 --> E3
+    
+    D1 --> C1
+    D2 --> C1
+    A4 --> C2
+    
+    C1 --> C2
+    C2 --> C3
+    C3 --> C4
+    C4 --> D3
+    C4 --> E1
+    C4 --> E2
+    
+    style B1 fill:#e1f5fe
+    style B2 fill:#e1f5fe
+    style C1 fill:#f3e5f5
+```
+
 ## 📥 Workflow 1 - Synchronisation des Agences (n8n)
 
 ### ⚡ Description
@@ -74,6 +133,46 @@ Ce workflow n8n synchronise les données des agences immobilières depuis l'API 
 - **Google Maps/SerpAPI** : Enrichissement avec horaires et informations GMB
 - **PostgreSQL** : Base de données de destination
 - **Webhook** : Notification pour traitements complémentaires
+
+### 📊 Schéma du workflow agences
+
+```mermaid
+sequenceDiagram
+    participant S as Schedule Trigger
+    participant N as Netty API
+    participant W as Workflow n8n
+    participant G as Google/SerpAPI
+    participant DB as PostgreSQL
+    participant WH as Webhook
+    
+    S->>W: Déclenchement
+    
+    loop Pagination
+        W->>N: GET /companies (limit=10)
+        N-->>W: Companies data
+        
+        loop Pour chaque agence
+            W->>W: Transform social networks
+            W->>W: Transform departments
+            
+            alt Has GMB URL
+                W->>G: Get Place ID
+                G-->>W: Place info
+                W->>G: Get business details
+                G-->>W: Opening hours
+                W->>W: Convert to 24h format
+            end
+            
+            W->>DB: SELECT AVG(rating)
+            DB-->>W: Note moyenne
+            
+            W->>DB: UPSERT agence
+            DB-->>W: Success
+            
+            W->>WH: Notify completion
+        end
+    end
+```
 
 ---
 
@@ -157,6 +256,60 @@ Ce workflow n8n synchronise les données des utilisateurs/agents toutes les 10 m
 - La fréquence de 10 minutes pour les users assure une synchronisation quasi temps réel
 - Les IDs spéciaux (186, 196, 204) ont un traitement particulier pour le user_profile
 - Le cache Imgix doit être purgé pour que les nouveaux avatars soient visibles
+
+### 📊 Schéma du workflow utilisateurs
+
+```mermaid
+graph LR
+    subgraph "Déclenchement"
+        A1[Schedule<br/>10 min]
+        A2[Get last<br/>time_modified]
+    end
+    
+    subgraph "Récupération Netty"
+        B1[Page 0<br/>0-99]
+        B2[Page 1<br/>100-199]
+        B3[Page 2<br/>200-299]
+    end
+    
+    subgraph "Traitement"
+        C1[Filter<br/>time_modified exists]
+        C2[Special IDs<br/>186,196,204]
+        C3[Set user_profile=4]
+    end
+    
+    subgraph "Sauvegarde"
+        D1[UPSERT users<br/>by user_id]
+        D2[Generate avatar<br/>users-{id}.jpg]
+    end
+    
+    subgraph "Cache"
+        E1[Imgix API<br/>Purge cache]
+        E2[Bearer token<br/>Authentication]
+    end
+    
+    A1 --> A2
+    A2 --> B1
+    A2 --> B2
+    A2 --> B3
+    
+    B1 --> C1
+    B2 --> C1
+    B3 --> C1
+    
+    C1 --> C2
+    C2 -->|Yes| C3
+    C2 -->|No| D1
+    C3 --> D1
+    
+    D1 --> D2
+    D2 --> E1
+    E1 --> E2
+    
+    style A1 fill:#e1f5fe
+    style C2 fill:#fff3e0
+    style E1 fill:#f3e5f5
+```
 
 ---
 
@@ -301,6 +454,105 @@ graph TD
     D -->|Toujours| F[Table directories]
     D -->|Termes recherche| G[Bubble searchdirectory]
     E -->|ID Bubble| F
+```
+
+### 📊 Schéma détaillé de la fusion des données
+
+```mermaid
+graph TB
+    subgraph "Requête SQL UNION"
+        A1[Branch 1: Agence ID=2<br/>Users indépendants]
+        A2[Branch 2: Autres agences<br/>Users rattachés]
+        A3[UNION ALL]
+    end
+    
+    subgraph "Filtres appliqués"
+        B1[Exclusions emails:<br/>laurent.lexact@<br/>stephane.moquet@<br/>etc...]
+        B2[Exclusions agences:<br/>ID 10, ID 115]
+        B3[Conditions:<br/>actif = true<br/>GMB renseigné ou NULL]
+    end
+    
+    subgraph "Enrichissement données"
+        C1[Comptage biens vente<br/>type_offre = 1]
+        C2[Comptage biens location<br/>type_offre = 2]
+        C3[Calcul order<br/>total + 10000 si agence]
+    end
+    
+    subgraph "Génération identifiants"
+        D1[Agent slug:<br/>nom-agent-{user_id}]
+        D2[Agence slug:<br/>nom-agence-{agency_id}]
+        D3[Search terms:<br/>[nom, agence, ville...]]
+    end
+    
+    subgraph "Synchronisation"
+        E1{actif = true?}
+        E2[CREATE/UPDATE<br/>Bubble Directory]
+        E3[DELETE<br/>Bubble Directory]
+        E4[UPSERT<br/>directories table]
+    end
+    
+    A1 --> A3
+    A2 --> A3
+    A3 --> B1
+    B1 --> B2
+    B2 --> B3
+    
+    B3 --> C1
+    B3 --> C2
+    C1 --> C3
+    C2 --> C3
+    
+    C3 --> D1
+    C3 --> D2
+    C3 --> D3
+    
+    D3 --> E1
+    E1 -->|Yes| E2
+    E1 -->|No & has _id| E3
+    E1 --> E4
+    
+    style A1 fill:#e8f5e9
+    style A2 fill:#e8f5e9
+    style E2 fill:#e1f5fe
+    style E3 fill:#ffebee
+```
+
+### 📊 Structure de données du directory
+
+```mermaid
+erDiagram
+    DIRECTORY {
+        integer id PK "user_id ou agency_id"
+        boolean annuaire "true=agence, false=agent"
+        string nom "Nom affiché"
+        string nom_agence "Nom de l'agence"
+        string adresse "Vide pour agents sauf indép"
+        string telephone "Mobile, fixe ou secondaire"
+        text presentation "Description courte"
+        boolean actif "activated ou !supprime"
+        string image "URL image principale"
+        string mignature "URL miniature"
+        string google_my_business "URL GMB"
+        json horaires "monday-sunday"
+        float note_moyenne "Note Google"
+        integer order "Nb biens + bonus agence"
+        integer vente "Nb biens en vente"
+        integer loc "Nb biens en location"
+        string temp_slug "URL unique"
+        array search "Termes recherche"
+        string _id "Bubble ID"
+    }
+    
+    USERS ||--o{ DIRECTORY : becomes
+    AGENCES ||--o{ DIRECTORY : becomes
+    PROPERTIES ||--o{ DIRECTORY : counted_in
+    
+    BUBBLE_DIRECTORY {
+        string id PK
+        json data "Toutes les données"
+    }
+    
+    DIRECTORY ||--o| BUBBLE_DIRECTORY : syncs_to
 ```
 
 ### 🔄 Interaction avec les autres flux

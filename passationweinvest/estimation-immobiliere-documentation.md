@@ -6,6 +6,66 @@ Le système d'estimation immobilière de Weinvest s'appuie sur deux workflows n8
 1. **Répartition des codes postaux par agences** : Attribution automatique des leads aux conseillers/agences selon la zone géographique
 2. **Traitement des demandes d'estimation** : Gestion complète du lead depuis le formulaire jusqu'à la distribution aux conseillers
 
+### 📊 Schéma global du système
+
+```mermaid
+graph TB
+    subgraph "Workflow 1 - Répartition CP"
+        A1[Schedule 1h] --> A2[TRUNCATE cp_mandataire]
+        A2 --> A3[Get Agences/Users]
+        A3 --> A4{Pour chaque<br/>conseiller}
+        A4 --> A5[Calcul distances CP]
+        A5 --> A6[INSERT cp_mandataire]
+        A6 --> A4
+    end
+    
+    subgraph "Workflow 2 - Estimation"
+        B1[Webhook /newestim] --> B2[Decode Base64]
+        B2 --> B3{Estimation<br/>existe?}
+        B3 -->|Non| B4[CityScan API]
+        B3 -->|Oui| B13[Return cache]
+        B4 --> B5[Géocodage]
+        B5 --> B6[Estimation prix]
+        B6 --> B7[IA Mapping]
+        B7 --> B8[Store estim]
+        B8 --> B9[Find Conseiller]
+        B9 --> B10[Create Netty]
+        B10 --> B11[Send Notifs]
+        B11 --> B12[Response]
+    end
+    
+    subgraph "External Services"
+        C1[CityScan API]
+        C2[Anthropic Claude]
+        C3[Netty CRM]
+        C4[Gmail/Slack]
+    end
+    
+    subgraph "Database"
+        D1[(cp_mandataire)]
+        D2[(estim)]
+        D3[(users/agences)]
+    end
+    
+    A6 -.->|Write| D1
+    B9 -.->|Read| D1
+    B8 -.->|Write| D2
+    B3 -.->|Read| D2
+    A3 -.->|Read| D3
+    
+    B4 --> C1
+    B7 --> C2
+    B10 --> C3
+    B11 --> C4
+    
+    style A1 fill:#e1f5fe
+    style B1 fill:#e1f5fe
+    style C1 fill:#fff3e0
+    style C2 fill:#fff3e0
+    style C3 fill:#fff3e0
+    style C4 fill:#fff3e0
+```
+
 ## 🔄 Workflow 1 : Répartition des codes postaux par agences
 
 ### 📊 Description
@@ -36,6 +96,55 @@ Le système d'estimation immobilière de Weinvest s'appuie sur deux workflows n8
      - **Province** : distance 30km, limit 100
 
 4. **Exécution du workflow de géolocalisation** : `hED86KLwdHs2CdaC`
+
+### 📊 Schéma du processus de répartition
+
+```mermaid
+graph LR
+    subgraph "Données sources"
+        A1[Table users<br/>Conseillers actifs]
+        A2[Table agences<br/>Agences actives]
+    end
+    
+    subgraph "Filtrage"
+        B1[Exclusions:<br/>- Emails internes<br/>- Agence ID 10<br/>- User ID 170]
+        B2[Critères:<br/>- actif = true<br/>- google_my_business renseigné]
+    end
+    
+    subgraph "Configuration zones"
+        C1[IDF<br/>75,77,78,91,92,93,94,95<br/>Distance: 10km<br/>Limit: 6]
+        C2[Province<br/>Autres départements<br/>Distance: 30km<br/>Limit: 100]
+    end
+    
+    subgraph "Calcul distances"
+        D1[Pour chaque CP France]
+        D2[Calcul distance<br/>conseiller ↔ CP]
+        D3[Tri par distance]
+        D4[Application limite]
+    end
+    
+    subgraph "Table cp_mandataire"
+        E1[cp: code postal]
+        E2[id_conseiller: user_id]
+        E3[id_agence: agency_id]
+        E4[distance: km]
+    end
+    
+    A1 --> B1
+    A2 --> B1
+    B1 --> B2
+    B2 --> C1
+    B2 --> C2
+    C1 --> D1
+    C2 --> D1
+    D1 --> D2
+    D2 --> D3
+    D3 --> D4
+    D4 --> E1
+    
+    style C1 fill:#e3f2fd
+    style C2 fill:#f3e5f5
+```
 
 ## 🔄 Workflow 2 : Traitement des demandes d'estimation
 
@@ -111,6 +220,106 @@ Le système d'estimation immobilière de Weinvest s'appuie sur deux workflows n8
     - Notification Slack (#notif-fr-valuation_requests)
     - Sauvegarde Google Sheets (2 onglets : estimhzv2, estimv2)
     - Webhook CRM avec segments (84 et 91)
+
+### 📊 Schéma du flux d'estimation
+
+```mermaid
+sequenceDiagram
+    participant F as Formulaire Web
+    participant W as Webhook n8n
+    participant C as CityScan API
+    participant AI as Claude AI
+    participant DB as Database
+    participant N as Netty CRM
+    participant M as Notifications
+    
+    F->>W: POST /newestim (base64)
+    W->>W: Decode base64
+    W->>DB: Check estim exists
+    
+    alt Estimation existe
+        DB-->>W: Return cached estim
+        W-->>F: Response 200 (cached)
+    else Nouvelle estimation
+        W->>C: Authenticate
+        C-->>W: Bearer token
+        W->>C: Geocode address
+        C-->>W: Coordinates
+        W->>C: Get valuation
+        C-->>W: Price estimation
+        
+        W->>AI: Map form fields
+        AI-->>W: Structured data
+        
+        W->>DB: Store estimation
+        W->>DB: Get conseiller (cp_mandataire)
+        DB-->>W: Conseiller info
+        
+        W->>N: Create contact
+        W->>N: Create task (type 4)
+        N-->>W: Success
+        
+        par Notifications parallèles
+            W->>M: Email conseiller
+            W->>M: Slack notification
+            W->>M: Google Sheets
+            W->>M: CRM webhook
+        end
+        
+        W-->>F: Response 200 (new)
+    end
+```
+
+### 📊 Structure des données d'estimation
+
+```mermaid
+graph TD
+    subgraph "Input Form Data"
+        A1[Contact Info<br/>nom, prenom, email, tel]
+        A2[Property Location<br/>route, postalCode, city]
+        A3[Property Details<br/>type, area, rooms, floor]
+        A4[Property Features<br/>elevator, parking, garden]
+        A5[Property Condition<br/>état, DPE, bruit, luminosité]
+    end
+    
+    subgraph "CityScan Response"
+        B1[Geocoding<br/>lat, lng, formatted_address]
+        B2[Valuation<br/>low, mid, high prices]
+        B3[Market Data<br/>comparables, trends]
+    end
+    
+    subgraph "AI Mapping"
+        C1[Type mapping<br/>1→Maison, 2→Appart...]
+        C2[État mapping<br/>1→Neuf, 2→Rafraîchi...]
+        C3[Features extraction<br/>boolean→text description]
+    end
+    
+    subgraph "Final Message"
+        D1[👤 Contact Section]
+        D2[🏠 Property Section]
+        D3[📍 Details Section]
+        D4[💰 Financial Section]
+        D5[💸 Estimation Section]
+    end
+    
+    A1 --> C1
+    A2 --> B1
+    A3 --> C2
+    A4 --> C3
+    A5 --> C3
+    
+    B1 --> D2
+    B2 --> D5
+    C1 --> D2
+    C2 --> D3
+    C3 --> D3
+    
+    style B1 fill:#e8f5e9
+    style B2 fill:#e8f5e9
+    style C1 fill:#fce4ec
+    style C2 fill:#fce4ec
+    style C3 fill:#fce4ec
+```
 
 ## 🔗 Intégrations
 

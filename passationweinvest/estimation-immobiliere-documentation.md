@@ -40,7 +40,7 @@ Le système d'estimation immobilière de Weinvest s'appuie sur deux workflows n8
 ## 🔄 Workflow 2 : Traitement des demandes d'estimation
 
 ### 📊 Description
-- **URL** : https://sync.weinvest.app/webhook/9ASIe7OIsp9Oymrl
+- **URL** : https://sync.weinvest.app/workflow/9ASIe7OIsp9Oymrl
 - **Déclencheur** : Webhook POST `/newestim`
 - **Objectif** : Traiter les demandes d'estimation, enrichir les données et distribuer aux conseillers
 
